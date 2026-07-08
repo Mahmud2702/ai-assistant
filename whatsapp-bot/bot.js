@@ -1,116 +1,56 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
-const axios  = require('axios');
+const axios = require('axios');
+const fs = require('fs');
+const { execSync } = require('child_process');
 
 const API_URL = process.env.API_URL || 'http://localhost:8800';
 const API_KEY = process.env.API_KEY || 'legallens_secret_2024';
 
-const api = axios.create({
-  baseURL: API_URL,
-  headers: { 'x-api-key': API_KEY, 'Content-Type': 'application/json' },
-  timeout: 45000,
-});
+function findChromium() {
+  const paths = ['/usr/bin/chromium','/usr/bin/chromium-browser','/usr/bin/google-chrome'];
+  for (const p of paths) { if (fs.existsSync(p)) return p; }
+  try { return execSync('which chromium chromium-browser 2>/dev/null | head -1',{encoding:'utf8'}).trim() || null; } catch(e) {}
+  try { return execSync('find /nix -name chromium -type f 2>/dev/null | head -1',{encoding:'utf8'}).trim() || null; } catch(e) {}
+  return null;
+}
 
-// ── Commands ──────────────────────────────────────────────────────────────────
-const CMDS = {
-  '!সারাংশ':    'summary',
-  '!summary':    'summary',
-  '!rewrite':    'rewrite',
-  '!লেখো':      'rewrite',
-  '!distribute': 'distribute',
-  '!শেয়ার':    'distribute',
-};
+const chromiumPath = findChromium();
+console.log('Chromium:', chromiumPath || 'auto');
 
-const HELP = `🤖 *AI Assistant*
+const puppeteerConfig = { headless:true, args:['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--single-process','--no-zygote'] };
+if (chromiumPath) puppeteerConfig.executablePath = chromiumPath;
 
-*Text commands:*
-!সারাংশ [text] — summary
-!rewrite [text] — rewrite
-!distribute [text] — Social/Email/SMS
+const api = axios.create({ baseURL:API_URL, headers:{'x-api-key':API_KEY,'Content-Type':'application/json'}, timeout:45000 });
+const CMDS = { '!summary':'summary','!rewrite':'rewrite','!distribute':'distribute' };
 
-*Chat:*
-!চ্যাট — এই chat এর শেষ ২০ message এর summary
+const client = new Client({ authStrategy: new LocalAuth({ dataPath:'/tmp/.wwebjs_auth' }), puppeteer: puppeteerConfig });
 
-*Info:*
-!status — AI status দেখো`;
+client.on('qr', qr => { console.log('\n📱 QR:\n'); qrcode.generate(qr,{small:true}); });
+client.on('ready', () => console.log('✅ Bot ready!'));
+client.on('disconnected', () => setTimeout(() => client.initialize(), 10000));
 
-// ── Client ────────────────────────────────────────────────────────────────────
-const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth' }),
-  puppeteer: {
-    headless: true,
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-  },
-});
-
-client.on('qr', qr => {
-  console.log('\n📱 QR Code স্ক্যান করো:\n');
-  qrcode.generate(qr, { small: true });
-});
-
-client.on('ready', () => console.log('✅ WhatsApp Bot চালু!'));
-
-client.on('disconnected', reason => {
-  console.log('🔌 Disconnected:', reason, '— 10s পরে reconnect...');
-  setTimeout(() => client.initialize(), 10000);
-});
-
-// ── Messages ──────────────────────────────────────────────────────────────────
 client.on('message', async msg => {
   try {
     const body = msg.body?.trim();
     if (!body) return;
-
-    // !status
-    if (body === '!status') {
-      const r = await api.get('/');
-      const s = r.data.ai_status;
-      return msg.reply(
-        `🤖 *AI Status*\nGemini: ${s.gemini}\nClaude: ${s.claude}\nMode: ${s.active}`
-      );
+    if (body === '!chat') {
+      const chat = await msg.getChat();
+      const msgs = (await chat.fetchMessages({limit:20})).filter(m=>m.body&&m.type==='chat').map(m=>`${m.fromMe?'Me':m.author||'Other'}: ${m.body}`);
+      const r = await api.post('/whatsapp/summary',{messages:msgs,chat_name:chat.name||'Chat'});
+      return msg.reply('📊 Summary:\n\n'+r.data.summary);
     }
-
-    // !help
-    if (body === '!help' || body === '!সাহায্য') return msg.reply(HELP);
-
-    // !চ্যাট
-    if (body === '!চ্যাট' || body === '!chat') return handleChatSummary(msg);
-
-    // text commands
-    for (const [cmd, mode] of Object.entries(CMDS)) {
-      if (body.toLowerCase().startsWith(cmd.toLowerCase())) {
+    for (const [cmd,mode] of Object.entries(CMDS)) {
+      if (body.toLowerCase().startsWith(cmd)) {
         const text = body.slice(cmd.length).trim();
-        if (!text) return msg.reply(`⚠️ Text দাও!\nউদাহরণ: ${cmd} তোমার text...`);
-        return handleText(msg, text, mode);
+        if (!text) return msg.reply('Please add text.');
+        await msg.reply('⏳ Processing...');
+        const r = await api.post('/text/process',{text,mode});
+        return msg.reply(r.data.result);
       }
     }
-  } catch (err) {
-    console.error('Handler error:', err.message);
-    msg.reply('❌ কিছু সমস্যা হয়েছে। আবার চেষ্টা করো।');
-  }
+  } catch(e) { msg.reply('❌ Error. Try again.'); }
 });
 
-// ── Handlers ──────────────────────────────────────────────────────────────────
-async function handleText(msg, text, mode) {
-  await msg.reply('⏳ প্রক্রিয়া করছি...');
-  const r = await api.post('/text/process', { text, mode });
-  const labels = { summary: '📋 সারাংশ', rewrite: '✍️ Rewrite', distribute: '📢 Distribution' };
-  msg.reply(`${labels[mode] || mode}:\n\n${r.data.result}`);
-}
-
-async function handleChatSummary(msg) {
-  await msg.reply('⏳ Chat পড়ছি...');
-  const chat  = await msg.getChat();
-  const all   = await chat.fetchMessages({ limit: 20 });
-  const texts = all
-    .filter(m => m.body && m.type === 'chat')
-    .map(m => `${m.fromMe ? 'আমি' : (m.author || 'অন্যজন')}: ${m.body}`);
-  if (!texts.length) return msg.reply('⚠️ কোনো text message পাওয়া যায়নি।');
-  const r = await api.post('/whatsapp/summary', { messages: texts, chat_name: chat.name || 'Chat' });
-  msg.reply(`📊 *Chat Summary (${texts.length} messages):*\n\n${r.data.summary}`);
-}
-
-// ── Start ─────────────────────────────────────────────────────────────────────
-console.log('🚀 Starting WhatsApp Bot...');
+console.log('🚀 Starting...');
 client.initialize();
