@@ -1,3 +1,5 @@
+import{rmSync,existsSync}from 'fs';
+if(existsSync('/tmp/auth'))rmSync('/tmp/auth',{recursive:true,force:true});
 import makeWASocket, { useMultiFileAuthState, DisconnectReason } from '@whiskeysockets/baileys';
 import axios from 'axios';
 import pino from 'pino';
